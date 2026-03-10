@@ -76,10 +76,6 @@ data["models"]["providers"][provider_id] = {
 
 data["agents"]["defaults"]["model"]["primary"] = full_model
 
-if isinstance(data["agents"].get("list"), list):
-    for agent in data["agents"]["list"]:
-        agent["model"] = full_model
-
 with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 PY
