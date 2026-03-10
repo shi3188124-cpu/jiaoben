@@ -1,3 +1,5 @@
+$ErrorActionPreference = "Stop"
+
 $ConfigPath = "$HOME\.openclaw\openclaw.json"
 $BaseUrl = "http://122.51.82.68:8059/v1"
 $ProviderId = "szy"
@@ -15,7 +17,7 @@ if (!(Test-Path $ConfigPath)) {
     throw "OpenClaw config file not found: $ConfigPath"
 }
 
-$json = Get-Content $ConfigPath -Raw | ConvertFrom-Json -Depth 100
+$json = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
 if (-not $json.models) {
     $json | Add-Member -NotePropertyName models -NotePropertyValue ([pscustomobject]@{})
@@ -62,6 +64,7 @@ $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 
 Write-Host ""
 Write-Host "OpenClaw config updated"
+Write-Host "Base URL: $BaseUrl"
 Write-Host "Default model: $FullModel"
 Write-Host "Config file: $ConfigPath"
 Write-Host ""
