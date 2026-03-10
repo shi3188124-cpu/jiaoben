@@ -8,25 +8,25 @@ MODEL_ID="gpt-5.4"
 FULL_MODEL="$PROVIDER_ID/$MODEL_ID"
 
 if ! command -v openclaw >/dev/null 2>&1; then
-  echo "未检测到 openclaw，请先安装 OpenClaw。"
+  echo "openclaw not found. Please install OpenClaw first."
   exit 1
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "未检测到 python3，请先安装 Python 3。"
+  echo "python3 not found. Please install Python 3 first."
   exit 1
 fi
 
 if [ ! -f "$CONFIG_PATH" ]; then
-  echo "找不到 OpenClaw 配置文件: $CONFIG_PATH"
+  echo "OpenClaw config file not found: $CONFIG_PATH"
   exit 1
 fi
 
-read -s -p "请输入 API Key: " API_KEY
+read -s -p "Enter API Key: " API_KEY
 echo
 
 if [ -z "$API_KEY" ]; then
-  echo "API Key 不能为空"
+  echo "API Key cannot be empty"
   exit 1
 fi
 
@@ -81,9 +81,9 @@ with open(config_path, "w", encoding="utf-8") as f:
 PY
 
 echo
-echo "✅ OpenClaw 配置已更新"
-echo "🤖 默认模型: $FULL_MODEL"
-echo "📄 配置文件: $CONFIG_PATH"
+echo "OpenClaw config updated"
+echo "Default model: $FULL_MODEL"
+echo "Config file: $CONFIG_PATH"
 echo
 
 openclaw gateway restart
