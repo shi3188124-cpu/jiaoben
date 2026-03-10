@@ -58,12 +58,6 @@ $provider = [pscustomobject]@{
 $json.models.providers | Add-Member -Force -NotePropertyName $ProviderId -NotePropertyValue $provider
 $json.agents.defaults.model.primary = $FullModel
 
-if ($json.agents.list) {
-    foreach ($agent in $json.agents.list) {
-        $agent.model = $FullModel
-    }
-}
-
 $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 
 Write-Host ""
