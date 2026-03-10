@@ -4,15 +4,15 @@ $ProviderId = "szy"
 $ModelId = "gpt-5.4"
 $FullModel = "$ProviderId/$ModelId"
 
-$SecureApiKey = Read-Host "请输入 API Key" -AsSecureString
+$SecureApiKey = Read-Host "Enter API Key" -AsSecureString
 $ApiKey = [System.Net.NetworkCredential]::new("", $SecureApiKey).Password
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
-    throw "API Key 不能为空"
+    throw "API Key cannot be empty"
 }
 
 if (!(Test-Path $ConfigPath)) {
-    throw "找不到 OpenClaw 配置文件: $ConfigPath"
+    throw "OpenClaw config file not found: $ConfigPath"
 }
 
 $json = Get-Content $ConfigPath -Raw | ConvertFrom-Json -Depth 100
@@ -61,9 +61,9 @@ $json.agents.defaults.model.primary = $FullModel
 $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 
 Write-Host ""
-Write-Host "✅ OpenClaw 配置已更新"
-Write-Host "🤖 默认模型: $FullModel"
-Write-Host "📄 配置文件: $ConfigPath"
+Write-Host "OpenClaw config updated"
+Write-Host "Default model: $FullModel"
+Write-Host "Config file: $ConfigPath"
 Write-Host ""
 
 openclaw gateway restart
