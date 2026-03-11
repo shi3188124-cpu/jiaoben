@@ -63,6 +63,20 @@ return $script.Source
 return $null
 }
 
+function Get-PythonCommand {
+$python = Get-Command "python" -ErrorAction SilentlyContinue
+if ($python) {
+return @($python.Source)
+}
+
+$py = Get-Command "py" -ErrorAction SilentlyContinue
+if ($py) {
+return @($py.Source, "-3")
+}
+
+return $null
+}
+
 function Invoke-OpenClaw {
 param(
 [Parameter(Mandatory = $true)][string[]]$Arguments
@@ -70,7 +84,7 @@ param(
 
 $commandPath = Get-OpenClawCommand
 if (-not $commandPath) {
-Write-Warning "openclaw command not found in PATH; skipping restart/status"
+Write-Warning "openclaw command not found in PATH; skipping restart"
 return
 }
 
@@ -294,6 +308,11 @@ continue
 }
 }
 
+$pythonCommand = Get-PythonCommand
+if (-not $pythonCommand) {
+throw "python or py launcher not found. Please install Python 3 first."
+}
+
 $SecureApiKey = Read-Host "Enter API Key" -AsSecureString
 $ApiKey = [System.Net.NetworkCredential]::new("", $SecureApiKey).Password
 
@@ -311,13 +330,9 @@ $models = Get-ModelList -BaseUrl $BaseUrl -ApiKey $ApiKey
 
 $selectedIndexes = Select-ModelsInteractive -Models $models
 $selectedModels = @($selectedIndexes | ForEach-Object { $models[$_] })
+$selectedModelIds = @($selectedModels | ForEach-Object { $_.id })
 
 $json = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-
-Ensure-ObjectProperty -Object $json -Name "auth" -Value ([pscustomobject]@{})
-Ensure-ObjectProperty -Object $json.auth -Name "profiles" -Value ([pscustomobject]@{})
-Ensure-ObjectProperty -Object $json -Name "models" -Value ([pscustomobject]@{})
-Ensure-ObjectProperty -Object $json.models -Name "providers" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json -Name "agents" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents -Name "defaults" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents.defaults -Name "model" -Value ([pscustomobject]@{})
@@ -328,61 +343,179 @@ $currentDefault = [string]$json.agents.defaults.model.primary
 }
 
 $selectedDefaultId = Select-DefaultModelInteractive -Models $selectedModels -CurrentDefault $currentDefault
-$FullModel = $null
-if ($selectedDefaultId) {
-$FullModel = "$ProviderId/$selectedDefaultId"
+
+$idsPath = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+$pyPath = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName() + '.py')
+
+try {
+Set-Content -Path $idsPath -Value ($selectedModelIds -join [Environment]::NewLine) -Encoding UTF8
+
+$pythonScript = @'
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime
+
+config_path = os.environ["OC_CONFIG_PATH"]
+base_url = os.environ["OC_BASE_URL"].rstrip("/")
+provider_id = os.environ["OC_PROVIDER_ID"]
+api_key = os.environ["OC_API_KEY"]
+selected_ids_path = os.environ["OC_SELECTED_IDS_FILE"]
+default_id = os.environ.get("OC_DEFAULT_ID") or None
+
+with open(selected_ids_path, "r", encoding="utf-8") as f:
+    selected_ids = [line.strip() for line in f if line.strip()]
+
+if not selected_ids:
+    raise SystemExit("No models selected")
+
+
+def normalize_input(value):
+    if value is None:
+        return ["text"]
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else ["text"]
+    if isinstance(value, list):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return normalized or ["text"]
+    text = str(value).strip()
+    return [text] if text else ["text"]
+
+
+req = urllib.request.Request(
+    f"{base_url}/models",
+    headers={"Authorization": f"Bearer {api_key}"},
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+except Exception as e:
+    raise SystemExit(f"Failed to refetch model list: {e}")
+
+if isinstance(payload, dict) and "data" in payload:
+    items = payload["data"]
+elif isinstance(payload, dict) and "models" in payload:
+    items = payload["models"]
+elif isinstance(payload, list):
+    items = payload
+else:
+    raise SystemExit("Unrecognized model response format")
+
+index = {}
+for item in items:
+    model_id = item.get("id")
+    if not model_id:
+        continue
+    cost = item.get("cost") or {}
+    index[model_id] = {
+        "id": model_id,
+        "name": item.get("name") or model_id,
+        "reasoning": bool(item.get("reasoning", True)),
+        "input": normalize_input(item.get("input")),
+        "cost": {
+            "input": cost.get("input", 0),
+            "output": cost.get("output", 0),
+            "cacheRead": cost.get("cacheRead", 0),
+            "cacheWrite": cost.get("cacheWrite", 0),
+        },
+        "contextWindow": item.get("contextWindow") or item.get("context_window") or 128000,
+        "maxTokens": item.get("maxTokens") or item.get("max_tokens") or 32768,
+    }
+
+selected_models = []
+for model_id in selected_ids:
+    if model_id not in index:
+        raise SystemExit(f"Selected model not found in API response: {model_id}")
+    selected_models.append(index[model_id])
+
+with open(config_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+backup_path = f"{config_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+with open(backup_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+
+data.setdefault("auth", {})
+data["auth"].setdefault("profiles", {})
+data.setdefault("models", {})
+data["models"].setdefault("providers", {})
+data.setdefault("agents", {})
+data["agents"].setdefault("defaults", {})
+data["agents"]["defaults"].setdefault("model", {})
+
+data["auth"]["profiles"][f"{provider_id}:default"] = {
+    "provider": provider_id,
+    "mode": "api_key",
 }
 
-$profileName = "$ProviderId`:default"
-$json.auth.profiles | Add-Member -Force -NotePropertyName $profileName -NotePropertyValue ([pscustomobject]@{
-provider = $ProviderId
-mode = "api_key"
-})
-
-$backupPath = "$ConfigPath.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-Copy-Item -Path $ConfigPath -Destination $backupPath -Force
-
-$provider = [pscustomobject]@{
-baseUrl = $BaseUrl
-apiKey = $ApiKey
-api = "openai-completions"
-models = @($selectedModels)
+data["models"]["providers"][provider_id] = {
+    "baseUrl": base_url,
+    "apiKey": api_key,
+    "api": "openai-completions",
+    "models": selected_models,
 }
 
-$json.models.providers | Add-Member -Force -NotePropertyName $ProviderId -NotePropertyValue $provider
-if ($FullModel) {
-$json.agents.defaults.model.primary = $FullModel
-}
+if default_id:
+    data["agents"]["defaults"]["model"]["primary"] = f"{provider_id}/{default_id}"
 
-$json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
+with open(config_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
 
-$writtenJson = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-$writtenModels = @($writtenJson.models.providers.$ProviderId.models)
-if ($writtenModels.Count -eq 0) {
-throw "Provider '$ProviderId' has no models after write"
-}
+with open(config_path, "r", encoding="utf-8") as f:
+    written = json.load(f)
 
-foreach ($writtenModel in $writtenModels) {
-$normalizedInput = Convert-ToInputList -InputValue $writtenModel.input
-if ($normalizedInput.Count -eq 0) {
-throw "Provider '$ProviderId' model '$($writtenModel.id)' is missing input values after write"
+written_models = ((((written.get("models") or {}).get("providers") or {}).get(provider_id) or {}).get("models")) or []
+if not written_models:
+    raise SystemExit(f"Provider '{provider_id}' has no models after write")
+
+for model in written_models:
+    model_input = model.get("input")
+    if not isinstance(model_input, list) or not model_input:
+        raise SystemExit(
+            f"Provider '{provider_id}' model '{model.get('id')}' has invalid input after write; expected non-empty array"
+        )
+
+print()
+print("OpenClaw config updated")
+print(f"Base URL: {base_url}")
+print(f"Selected models: {', '.join(m['id'] for m in selected_models)}")
+if default_id:
+    print(f"Default model: {provider_id}/{default_id}")
+else:
+    print("Default model: kept existing value")
+print(f"Config file: {config_path}")
+print(f"Backup file: {backup_path}")
+'@
+
+Set-Content -Path $pyPath -Value $pythonScript -Encoding UTF8
+
+$env:OC_CONFIG_PATH = $ConfigPath
+$env:OC_BASE_URL = $BaseUrl
+$env:OC_PROVIDER_ID = $ProviderId
+$env:OC_API_KEY = $ApiKey
+$env:OC_SELECTED_IDS_FILE = $idsPath
+$env:OC_DEFAULT_ID = if ($selectedDefaultId) { $selectedDefaultId } else { "" }
+
+& $pythonCommand[0] @($pythonCommand[1..($pythonCommand.Count - 1)]) $pyPath
+if ($LASTEXITCODE -ne 0) {
+throw "Python writer failed"
 }
+}
+finally {
+if (Test-Path $idsPath) { Remove-Item $idsPath -Force }
+if (Test-Path $pyPath) { Remove-Item $pyPath -Force }
+Remove-Item Env:OC_CONFIG_PATH -ErrorAction SilentlyContinue
+Remove-Item Env:OC_BASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:OC_PROVIDER_ID -ErrorAction SilentlyContinue
+Remove-Item Env:OC_API_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:OC_SELECTED_IDS_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:OC_DEFAULT_ID -ErrorAction SilentlyContinue
 }
 
 Write-Host ""
-Write-Host "OpenClaw config updated"
-Write-Host "Base URL: $BaseUrl"
-Write-Host "Selected models: $($selectedModels.id -join ', ')"
-if ($FullModel) {
-Write-Host "Default model: $FullModel"
-}
-else {
-Write-Host "Default model: kept existing value"
-}
-Write-Host "Config file: $ConfigPath"
-Write-Host "Backup file: $backupPath"
-Write-Host ""
-
+Write-Host "Requesting gateway restart..."
 Invoke-OpenClaw -Arguments @("gateway", "restart")
-Start-Sleep -Seconds 2
-Invoke-OpenClaw -Arguments @("status")
+Write-Host "Done."
