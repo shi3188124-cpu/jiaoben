@@ -295,6 +295,7 @@ print(f"Backup file: {backup_path}")
 print()
 PY
 
+echo
+printf '%s\n' "Requesting gateway restart..."
 openclaw gateway restart
-sleep 2
-openclaw status
+printf '%s\n' "Done."
