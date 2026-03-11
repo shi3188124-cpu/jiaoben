@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import urllib.request
+from datetime import datetime
 
 config_path = os.environ["CONFIG_PATH"]
 base_url = os.environ["BASE_URL"].rstrip("/")
@@ -112,42 +113,88 @@ if not models:
     print("No models were returned by the API", file=sys.stderr)
     sys.exit(1)
 
-print()
-print("Available models:")
-for idx, model in enumerate(models, start=1):
-    reasoning = "reasoning" if model["reasoning"] else "no-reasoning"
-    print(f"[{idx}] {model['id']} ({reasoning}, ctx {model['contextWindow']}, max {model['maxTokens']})")
-print()
 
-selection = input("Select one or more model numbers (comma-separated, e.g. 1,3,5): ").strip()
-parts = [p.strip() for p in selection.split(",") if p.strip()]
+def render(selected, cursor):
+    os.system("cls" if os.name == "nt" else "clear")
+    print("Available models:")
+    print("Use Up/Down to move, Space to select, Enter to confirm.")
+    print()
+    for idx, model in enumerate(models):
+        pointer = ">" if idx == cursor else " "
+        marker = "[x]" if idx in selected else "[ ]"
+        reasoning = "reasoning" if model["reasoning"] else "no-reasoning"
+        print(f"{pointer} {marker} {model['id']} ({reasoning}, ctx {model['contextWindow']}, max {model['maxTokens']})")
+    print()
+    print(f"Selected: {len(selected)}")
 
-if not parts:
-    print("You must select at least one model", file=sys.stderr)
-    sys.exit(1)
 
-selected_indexes = []
-for part in parts:
-    if not part.isdigit():
-        print(f"Invalid selection item: {part}", file=sys.stderr)
-        sys.exit(1)
-    idx = int(part)
-    if idx < 1 or idx > len(models):
-        print(f"Selection out of range: {idx}", file=sys.stderr)
-        sys.exit(1)
-    zero_idx = idx - 1
-    if zero_idx not in selected_indexes:
-        selected_indexes.append(zero_idx)
+def read_key():
+    try:
+        import msvcrt  # type: ignore
+        first = msvcrt.getwch()
+        if first in ("\r", "\n"):
+            return "ENTER"
+        if first == " ":
+            return "SPACE"
+        if first in ("\x00", "\xe0"):
+            second = msvcrt.getwch()
+            if second == "H":
+                return "UP"
+            if second == "P":
+                return "DOWN"
+        return None
+    except ImportError:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            first = sys.stdin.read(1)
+            if first in ("\r", "\n"):
+                return "ENTER"
+            if first == " ":
+                return "SPACE"
+            if first == "\x1b":
+                second = sys.stdin.read(1)
+                third = sys.stdin.read(1)
+                if second == "[" and third == "A":
+                    return "UP"
+                if second == "[" and third == "B":
+                    return "DOWN"
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
+
+selected = set()
+cursor = 0
+while True:
+    render(selected, cursor)
+    key = read_key()
+    if key == "UP":
+        cursor = (cursor - 1) % len(models)
+    elif key == "DOWN":
+        cursor = (cursor + 1) % len(models)
+    elif key == "SPACE":
+        if cursor in selected:
+            selected.remove(cursor)
+        else:
+            selected.add(cursor)
+    elif key == "ENTER":
+        if selected:
+            break
+
+selected_indexes = sorted(selected)
 selected_models = [models[i] for i in selected_indexes]
 
-print()
+os.system("cls" if os.name == "nt" else "clear")
 print("Selected models:")
 for idx, model in enumerate(selected_models, start=1):
     print(f"[{idx}] {model['id']}")
 print()
 
-default_choice = input("Choose the default model number from the selected list: ").strip()
+default_choice = input("Choose ONE default model number from the selected list: ").strip()
 if not default_choice.isdigit():
     print("Invalid default selection", file=sys.stderr)
     sys.exit(1)
@@ -159,7 +206,7 @@ if default_index < 0 or default_index >= len(selected_models):
 
 default_model = selected_models[default_index]
 full_model = f"{provider_id}/{default_model['id']}"
-backup_path = f"{config_path}.bak"
+backup_path = f"{config_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 with open(config_path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -167,11 +214,18 @@ with open(config_path, "r", encoding="utf-8") as f:
 with open(backup_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 
+data.setdefault("auth", {})
+data["auth"].setdefault("profiles", {})
 data.setdefault("models", {})
 data["models"].setdefault("providers", {})
 data.setdefault("agents", {})
 data["agents"].setdefault("defaults", {})
 data["agents"]["defaults"].setdefault("model", {})
+
+data["auth"]["profiles"][f"{provider_id}:default"] = {
+    "provider": provider_id,
+    "mode": "api_key",
+}
 
 data["models"]["providers"][provider_id] = {
     "baseUrl": base_url,
