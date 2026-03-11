@@ -192,7 +192,7 @@ Write-Host "Select at least one model before continuing." -ForegroundColor Yello
 Start-Sleep -Seconds 1
 continue
 }
-break
+return @($selected | Sort-Object)
 }
 38 {
 if ($cursor -gt 0) { $cursor-- } else { $cursor = $Models.Count - 1 }
