@@ -16,6 +16,67 @@ $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
 }
 }
 
+function Convert-ToInputList {
+param(
+[Parameter(Mandatory = $false)]$InputValue
+)
+
+if ($null -eq $InputValue) {
+return @("text")
+}
+
+if ($InputValue -is [string]) {
+$trimmed = $InputValue.Trim()
+if ($trimmed) {
+return @($trimmed)
+}
+
+return @("text")
+}
+
+$values = @($InputValue | ForEach-Object {
+if ($null -eq $_) { return }
+$text = [string]$_
+if (-not [string]::IsNullOrWhiteSpace($text)) {
+$text.Trim()
+}
+})
+
+if ($values.Count -gt 0) {
+return @($values)
+}
+
+return @("text")
+}
+
+function Get-OpenClawCommand {
+$cmd = Get-Command "openclaw.cmd" -ErrorAction SilentlyContinue
+if ($cmd) {
+return $cmd.Source
+}
+
+$script = Get-Command "openclaw" -ErrorAction SilentlyContinue
+if ($script) {
+return $script.Source
+}
+
+return $null
+}
+
+function Invoke-OpenClaw {
+param(
+[Parameter(Mandatory = $true)][string[]]$Arguments
+)
+
+$commandPath = Get-OpenClawCommand
+if (-not $commandPath) {
+Write-Warning "openclaw command not found in PATH; skipping restart/status"
+return
+}
+
+& $commandPath @Arguments
+}
+
 function Convert-ToProviderModel {
 param(
 [Parameter(Mandatory = $true)]$Item
@@ -41,7 +102,7 @@ return [pscustomobject]@{
 id = $Item.id
 name = if ($Item.name) { $Item.name } else { $Item.id }
 reasoning = if ($null -ne $Item.reasoning) { [bool]$Item.reasoning } else { $true }
-input = if ($Item.input) { @($Item.input) } else { @("text") }
+input = Convert-ToInputList -InputValue $Item.input
 cost = $cost
 contextWindow = if ($Item.contextWindow) { $Item.contextWindow } elseif ($Item.context_window) { $Item.context_window } else { 128000 }
 maxTokens = if ($Item.maxTokens) { $Item.maxTokens } elseif ($Item.max_tokens) { $Item.max_tokens } else { 32768 }
@@ -200,6 +261,21 @@ $json.agents.defaults.model.primary = $FullModel
 
 $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 
+$writtenJson = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+$writtenModels = @($writtenJson.models.providers.$ProviderId.models)
+if ($writtenModels.Count -eq 0) {
+throw "Provider '$ProviderId' has no models after write"
+}
+
+foreach ($writtenModel in $writtenModels) {
+if ($writtenModel.input -is [string]) {
+throw "Provider '$ProviderId' model '$($writtenModel.id)' has invalid input type after write; expected array, got string"
+}
+if (@($writtenModel.input).Count -eq 0) {
+throw "Provider '$ProviderId' model '$($writtenModel.id)' is missing input values after write"
+}
+}
+
 Write-Host ""
 Write-Host "OpenClaw config updated"
 Write-Host "Base URL: $BaseUrl"
@@ -209,6 +285,7 @@ Write-Host "Config file: $ConfigPath"
 Write-Host "Backup file: $backupPath"
 Write-Host ""
 
-openclaw gateway restart
+Invoke-OpenClaw -Arguments @("gateway", "restart")
 Start-Sleep -Seconds 2
-openclaw status
+Invoke-OpenClaw -Arguments @("status")
+
