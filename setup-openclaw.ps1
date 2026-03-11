@@ -157,36 +157,67 @@ throw "No models were returned by the API"
 return $models
 }
 
-function Parse-Selection {
+function Select-ModelsInteractive {
 param(
-[Parameter(Mandatory = $true)][string]$Selection,
-[Parameter(Mandatory = $true)][int]$Max
+[Parameter(Mandatory = $true)]$Models
 )
 
-$parts = $Selection -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-if ($parts.Count -eq 0) {
-throw "You must select at least one model"
+$selected = New-Object 'System.Collections.Generic.HashSet[int]'
+$cursor = 0
+$rawUI = $Host.UI.RawUI
+
+while ($true) {
+Clear-Host
+Write-Host "Available models:" -ForegroundColor Cyan
+Write-Host "Use Up/Down to move, Space to select, Enter to confirm." -ForegroundColor DarkGray
+Write-Host ""
+
+for ($i = 0; $i -lt $Models.Count; $i++) {
+$model = $Models[$i]
+$marker = if ($selected.Contains($i)) { "[x]" } else { "[ ]" }
+$pointer = if ($i -eq $cursor) { ">" } else { " " }
+$reasoning = if ($model.reasoning) { "reasoning" } else { "no-reasoning" }
+Write-Host ("{0} {1} {2} ({3}, ctx {4}, max {5})" -f $pointer, $marker, $model.id, $reasoning, $model.contextWindow, $model.maxTokens)
 }
 
-$indexes = New-Object System.Collections.Generic.List[int]
+Write-Host ""
+Write-Host ("Selected: {0}" -f $selected.Count)
+$key = $rawUI.ReadKey("NoEcho,IncludeKeyDown")
 
-foreach ($part in $parts) {
-$num = 0
-if (-not [int]::TryParse($part, [ref]$num)) {
-throw "Invalid selection item: $part"
+switch ($key.VirtualKeyCode) {
+13 {
+if ($selected.Count -eq 0) {
+Write-Host ""
+Write-Host "Select at least one model before continuing." -ForegroundColor Yellow
+Start-Sleep -Seconds 1
+continue
+}
+break
+}
+38 {
+if ($cursor -gt 0) { $cursor-- } else { $cursor = $Models.Count - 1 }
+continue
+}
+40 {
+if ($cursor -lt ($Models.Count - 1)) { $cursor++ } else { $cursor = 0 }
+continue
+}
+32 {
+if ($selected.Contains($cursor)) {
+$selected.Remove($cursor) | Out-Null
+}
+else {
+$selected.Add($cursor) | Out-Null
+}
+continue
+}
+default {
+continue
+}
+}
 }
 
-if ($num -lt 1 -or $num -gt $Max) {
-throw "Selection out of range: $num"
-}
-
-$zeroIndex = $num - 1
-if (-not $indexes.Contains($zeroIndex)) {
-$indexes.Add($zeroIndex)
-}
-}
-
-return @($indexes)
+return @($selected | Sort-Object)
 }
 
 $SecureApiKey = Read-Host "Enter API Key" -AsSecureString
@@ -204,27 +235,17 @@ Write-Host ""
 Write-Host "Fetching models from: $BaseUrl"
 $models = Get-ModelList -BaseUrl $BaseUrl -ApiKey $ApiKey
 
-Write-Host ""
-Write-Host "Available models:"
-for ($i = 0; $i -lt $models.Count; $i++) {
-$m = $models[$i]
-$reasoning = if ($m.reasoning) { "reasoning" } else { "no-reasoning" }
-Write-Host (("[{0}] {1} ({2}, ctx {3}, max {4})" -f ($i + 1), $m.id, $reasoning, $m.contextWindow, $m.maxTokens))
-}
-
-Write-Host ""
-$multiChoice = Read-Host "Select one or more model numbers (comma-separated, e.g. 1,3,5)"
-$selectedIndexes = Parse-Selection -Selection $multiChoice -Max $models.Count
+$selectedIndexes = Select-ModelsInteractive -Models $models
 $selectedModels = @($selectedIndexes | ForEach-Object { $models[$_] })
 
-Write-Host ""
-Write-Host "Selected models:"
+Clear-Host
+Write-Host "Selected models:" -ForegroundColor Cyan
 for ($i = 0; $i -lt $selectedModels.Count; $i++) {
-Write-Host (("[{0}] {1}" -f ($i + 1), $selectedModels[$i].id))
+Write-Host ("[{0}] {1}" -f ($i + 1), $selectedModels[$i].id)
 }
 
 Write-Host ""
-$defaultChoice = Read-Host "Choose the default model number from the selected list"
+$defaultChoice = Read-Host "Choose ONE default model number from the selected list"
 $parsedDefault = 0
 if (-not [int]::TryParse($defaultChoice, [ref]$parsedDefault)) {
 throw "Invalid default selection"
@@ -240,11 +261,19 @@ $FullModel = "$ProviderId/$($DefaultModel.id)"
 
 $json = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
+Ensure-ObjectProperty -Object $json -Name "auth" -Value ([pscustomobject]@{})
+Ensure-ObjectProperty -Object $json.auth -Name "profiles" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json -Name "models" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.models -Name "providers" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json -Name "agents" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents -Name "defaults" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents.defaults -Name "model" -Value ([pscustomobject]@{})
+
+$profileName = "$ProviderId`:default"
+$json.auth.profiles | Add-Member -Force -NotePropertyName $profileName -NotePropertyValue ([pscustomobject]@{
+provider = $ProviderId
+mode = "api_key"
+})
 
 $backupPath = "$ConfigPath.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 Copy-Item -Path $ConfigPath -Destination $backupPath -Force
@@ -288,4 +317,3 @@ Write-Host ""
 Invoke-OpenClaw -Arguments @("gateway", "restart")
 Start-Sleep -Seconds 2
 Invoke-OpenClaw -Arguments @("status")
-
