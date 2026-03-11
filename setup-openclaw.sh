@@ -114,18 +114,8 @@ if not models:
     sys.exit(1)
 
 
-def render(selected, cursor):
+def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
-    print("Available models:")
-    print("Use Up/Down to move, Space to select, Enter to confirm.")
-    print()
-    for idx, model in enumerate(models):
-        pointer = ">" if idx == cursor else " "
-        marker = "[x]" if idx in selected else "[ ]"
-        reasoning = "reasoning" if model["reasoning"] else "no-reasoning"
-        print(f"{pointer} {marker} {model['id']} ({reasoning}, ctx {model['contextWindow']}, max {model['maxTokens']})")
-    print()
-    print(f"Selected: {len(selected)}")
 
 
 def read_key():
@@ -167,49 +157,84 @@ def read_key():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-selected = set()
-cursor = 0
-while True:
-    render(selected, cursor)
-    key = read_key()
-    if key == "UP":
-        cursor = (cursor - 1) % len(models)
-    elif key == "DOWN":
-        cursor = (cursor + 1) % len(models)
-    elif key == "SPACE":
-        if cursor in selected:
-            selected.remove(cursor)
-        else:
-            selected.add(cursor)
-    elif key == "ENTER":
-        if selected:
-            break
+def select_models_interactive(models):
+    selected = set()
+    cursor = 0
+    while True:
+        clear_screen()
+        print("Available models:")
+        print("Use Up/Down to move, Space to select, Enter to confirm.")
+        print()
+        for idx, model in enumerate(models):
+            pointer = ">" if idx == cursor else " "
+            marker = "[x]" if idx in selected else "[ ]"
+            reasoning = "reasoning" if model["reasoning"] else "no-reasoning"
+            print(f"{pointer} {marker} {model['id']} ({reasoning}, ctx {model['contextWindow']}, max {model['maxTokens']})")
+        print()
+        print(f"Selected: {len(selected)}")
+        key = read_key()
+        if key == "UP":
+            cursor = (cursor - 1) % len(models)
+        elif key == "DOWN":
+            cursor = (cursor + 1) % len(models)
+        elif key == "SPACE":
+            if cursor in selected:
+                selected.remove(cursor)
+            else:
+                selected.add(cursor)
+        elif key == "ENTER":
+            if selected:
+                return [models[i] for i in sorted(selected)]
 
-selected_indexes = sorted(selected)
-selected_models = [models[i] for i in selected_indexes]
 
-os.system("cls" if os.name == "nt" else "clear")
-print("Selected models:")
-for idx, model in enumerate(selected_models, start=1):
-    print(f"[{idx}] {model['id']}")
-print()
+def select_default_interactive(selected_models, current_default):
+    options = [{"label": "Keep current default model", "value": None}]
+    options.extend({"label": model["id"], "value": model["id"]} for model in selected_models)
 
-default_choice = input("Choose ONE default model number from the selected list: ").strip()
-if not default_choice.isdigit():
-    print("Invalid default selection", file=sys.stderr)
-    sys.exit(1)
+    cursor = 0
+    selected = 0
+    normalized_current = current_default
+    prefix = f"{provider_id}/"
+    if normalized_current and normalized_current.startswith(prefix):
+        normalized_current = normalized_current[len(prefix):]
 
-default_index = int(default_choice) - 1
-if default_index < 0 or default_index >= len(selected_models):
-    print("Default selection out of range", file=sys.stderr)
-    sys.exit(1)
+    if normalized_current:
+        for idx, option in enumerate(options[1:], start=1):
+            if option["value"] == normalized_current:
+                cursor = idx
+                selected = idx
+                break
 
-default_model = selected_models[default_index]
-full_model = f"{provider_id}/{default_model['id']}"
-backup_path = f"{config_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    while True:
+        clear_screen()
+        print("Choose default model:")
+        print("Use Up/Down to move, Space to select, Enter to confirm.")
+        print(f"Current default: {current_default or '(not set)'}")
+        print()
+        for idx, option in enumerate(options):
+            pointer = ">" if idx == cursor else " "
+            marker = "(*)" if idx == selected else "( )"
+            print(f"{pointer} {marker} {option['label']}")
+        key = read_key()
+        if key == "UP":
+            cursor = (cursor - 1) % len(options)
+        elif key == "DOWN":
+            cursor = (cursor + 1) % len(options)
+        elif key == "SPACE":
+            selected = cursor
+        elif key == "ENTER":
+            return options[selected]["value"]
+
+
+selected_models = select_models_interactive(models)
 
 with open(config_path, "r", encoding="utf-8") as f:
     data = json.load(f)
+
+current_default = ((((data.get("agents") or {}).get("defaults") or {}).get("model") or {}).get("primary"))
+selected_default_id = select_default_interactive(selected_models, current_default)
+full_model = f"{provider_id}/{selected_default_id}" if selected_default_id else None
+backup_path = f"{config_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 with open(backup_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -234,7 +259,8 @@ data["models"]["providers"][provider_id] = {
     "models": selected_models,
 }
 
-data["agents"]["defaults"]["model"]["primary"] = full_model
+if full_model:
+    data["agents"]["defaults"]["model"]["primary"] = full_model
 
 with open(config_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -248,14 +274,8 @@ if not written_models:
     sys.exit(1)
 
 for model in written_models:
-    model_input = model.get("input")
-    if isinstance(model_input, str):
-        print(
-            f"Provider '{provider_id}' model '{model.get('id')}' has invalid input type after write; expected array, got string",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if not isinstance(model_input, list) or not model_input:
+    model_input = normalize_input(model.get("input"))
+    if not model_input:
         print(
             f"Provider '{provider_id}' model '{model.get('id')}' is missing input values after write",
             file=sys.stderr,
@@ -266,7 +286,10 @@ print()
 print("OpenClaw config updated")
 print(f"Base URL: {base_url}")
 print(f"Selected models: {', '.join(m['id'] for m in selected_models)}")
-print(f"Default model: {full_model}")
+if full_model:
+    print(f"Default model: {full_model}")
+else:
+    print("Default model: kept existing value")
 print(f"Config file: {config_path}")
 print(f"Backup file: {backup_path}")
 print()
