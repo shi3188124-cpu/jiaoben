@@ -220,6 +220,80 @@ continue
 return @($selected | Sort-Object)
 }
 
+function Select-DefaultModelInteractive {
+param(
+[Parameter(Mandatory = $true)]$Models,
+[Parameter(Mandatory = $false)][string]$CurrentDefault
+)
+
+$options = @(
+[pscustomobject]@{ label = "Keep current default model"; value = $null }
+) + @($Models | ForEach-Object {
+[pscustomobject]@{ label = $_.id; value = $_.id }
+})
+
+$cursor = 0
+$selected = 0
+$rawUI = $Host.UI.RawUI
+
+if ($CurrentDefault) {
+$normalizedCurrent = $CurrentDefault
+if ($normalizedCurrent.StartsWith("$ProviderId/")) {
+$normalizedCurrent = $normalizedCurrent.Substring($ProviderId.Length + 1)
+}
+
+for ($i = 1; $i -lt $options.Count; $i++) {
+if ($options[$i].value -eq $normalizedCurrent) {
+$selected = $i
+$cursor = $i
+break
+}
+}
+}
+
+while ($true) {
+Clear-Host
+Write-Host "Choose default model:" -ForegroundColor Cyan
+Write-Host "Use Up/Down to move, Space to select, Enter to confirm." -ForegroundColor DarkGray
+if ($CurrentDefault) {
+Write-Host ("Current default: {0}" -f $CurrentDefault) -ForegroundColor DarkGray
+}
+else {
+Write-Host "Current default: (not set)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+for ($i = 0; $i -lt $options.Count; $i++) {
+$pointer = if ($i -eq $cursor) { ">" } else { " " }
+$marker = if ($i -eq $selected) { "(*)" } else { "( )" }
+Write-Host ("{0} {1} {2}" -f $pointer, $marker, $options[$i].label)
+}
+
+$key = $rawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+switch ($key.VirtualKeyCode) {
+13 {
+return $options[$selected].value
+}
+38 {
+if ($cursor -gt 0) { $cursor-- } else { $cursor = $options.Count - 1 }
+continue
+}
+40 {
+if ($cursor -lt ($options.Count - 1)) { $cursor++ } else { $cursor = 0 }
+continue
+}
+32 {
+$selected = $cursor
+continue
+}
+default {
+continue
+}
+}
+}
+}
+
 $SecureApiKey = Read-Host "Enter API Key" -AsSecureString
 $ApiKey = [System.Net.NetworkCredential]::new("", $SecureApiKey).Password
 
@@ -238,27 +312,6 @@ $models = Get-ModelList -BaseUrl $BaseUrl -ApiKey $ApiKey
 $selectedIndexes = Select-ModelsInteractive -Models $models
 $selectedModels = @($selectedIndexes | ForEach-Object { $models[$_] })
 
-Clear-Host
-Write-Host "Selected models:" -ForegroundColor Cyan
-for ($i = 0; $i -lt $selectedModels.Count; $i++) {
-Write-Host ("[{0}] {1}" -f ($i + 1), $selectedModels[$i].id)
-}
-
-Write-Host ""
-$defaultChoice = Read-Host "Choose ONE default model number from the selected list"
-$parsedDefault = 0
-if (-not [int]::TryParse($defaultChoice, [ref]$parsedDefault)) {
-throw "Invalid default selection"
-}
-
-$defaultIndex = $parsedDefault - 1
-if ($defaultIndex -lt 0 -or $defaultIndex -ge $selectedModels.Count) {
-throw "Default selection out of range"
-}
-
-$DefaultModel = $selectedModels[$defaultIndex]
-$FullModel = "$ProviderId/$($DefaultModel.id)"
-
 $json = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
 Ensure-ObjectProperty -Object $json -Name "auth" -Value ([pscustomobject]@{})
@@ -268,6 +321,17 @@ Ensure-ObjectProperty -Object $json.models -Name "providers" -Value ([pscustomob
 Ensure-ObjectProperty -Object $json -Name "agents" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents -Name "defaults" -Value ([pscustomobject]@{})
 Ensure-ObjectProperty -Object $json.agents.defaults -Name "model" -Value ([pscustomobject]@{})
+
+$currentDefault = $null
+if ($json.agents.defaults.model.PSObject.Properties.Name -contains 'primary') {
+$currentDefault = [string]$json.agents.defaults.model.primary
+}
+
+$selectedDefaultId = Select-DefaultModelInteractive -Models $selectedModels -CurrentDefault $currentDefault
+$FullModel = $null
+if ($selectedDefaultId) {
+$FullModel = "$ProviderId/$selectedDefaultId"
+}
 
 $profileName = "$ProviderId`:default"
 $json.auth.profiles | Add-Member -Force -NotePropertyName $profileName -NotePropertyValue ([pscustomobject]@{
@@ -286,7 +350,9 @@ models = @($selectedModels)
 }
 
 $json.models.providers | Add-Member -Force -NotePropertyName $ProviderId -NotePropertyValue $provider
+if ($FullModel) {
 $json.agents.defaults.model.primary = $FullModel
+}
 
 $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 
@@ -297,10 +363,8 @@ throw "Provider '$ProviderId' has no models after write"
 }
 
 foreach ($writtenModel in $writtenModels) {
-if ($writtenModel.input -is [string]) {
-throw "Provider '$ProviderId' model '$($writtenModel.id)' has invalid input type after write; expected array, got string"
-}
-if (@($writtenModel.input).Count -eq 0) {
+$normalizedInput = Convert-ToInputList -InputValue $writtenModel.input
+if ($normalizedInput.Count -eq 0) {
 throw "Provider '$ProviderId' model '$($writtenModel.id)' is missing input values after write"
 }
 }
@@ -309,7 +373,12 @@ Write-Host ""
 Write-Host "OpenClaw config updated"
 Write-Host "Base URL: $BaseUrl"
 Write-Host "Selected models: $($selectedModels.id -join ', ')"
+if ($FullModel) {
 Write-Host "Default model: $FullModel"
+}
+else {
+Write-Host "Default model: kept existing value"
+}
 Write-Host "Config file: $ConfigPath"
 Write-Host "Backup file: $backupPath"
 Write-Host ""
