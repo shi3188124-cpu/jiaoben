@@ -96,6 +96,38 @@ throw "No models were returned by the API"
 return $models
 }
 
+function Parse-Selection {
+param(
+[Parameter(Mandatory = $true)][string]$Selection,
+[Parameter(Mandatory = $true)][int]$Max
+)
+
+$parts = $Selection -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+if ($parts.Count -eq 0) {
+throw "You must select at least one model"
+}
+
+$indexes = New-Object System.Collections.Generic.List[int]
+
+foreach ($part in $parts) {
+$num = 0
+if (-not [int]::TryParse($part, [ref]$num)) {
+throw "Invalid selection item: $part"
+}
+
+if ($num -lt 1 -or $num -gt $Max) {
+throw "Selection out of range: $num"
+}
+
+$zeroIndex = $num - 1
+if (-not $indexes.Contains($zeroIndex)) {
+$indexes.Add($zeroIndex)
+}
+}
+
+return @($indexes)
+}
+
 $SecureApiKey = Read-Host "Enter API Key" -AsSecureString
 $ApiKey = [System.Net.NetworkCredential]::new("", $SecureApiKey).Password
 
@@ -120,19 +152,30 @@ Write-Host (("[{0}] {1} ({2}, ctx {3}, max {4})" -f ($i + 1), $m.id, $reasoning,
 }
 
 Write-Host ""
-$choice = Read-Host "Select model number"
-$parsedChoice = 0
-if (-not [int]::TryParse($choice, [ref]$parsedChoice)) {
-throw "Invalid selection: please enter a number"
+$multiChoice = Read-Host "Select one or more model numbers (comma-separated, e.g. 1,3,5)"
+$selectedIndexes = Parse-Selection -Selection $multiChoice -Max $models.Count
+$selectedModels = @($selectedIndexes | ForEach-Object { $models[$_] })
+
+Write-Host ""
+Write-Host "Selected models:"
+for ($i = 0; $i -lt $selectedModels.Count; $i++) {
+Write-Host (("[{0}] {1}" -f ($i + 1), $selectedModels[$i].id))
 }
 
-$selectedIndex = $parsedChoice - 1
-if ($selectedIndex -lt 0 -or $selectedIndex -ge $models.Count) {
-throw "Selection out of range"
+Write-Host ""
+$defaultChoice = Read-Host "Choose the default model number from the selected list"
+$parsedDefault = 0
+if (-not [int]::TryParse($defaultChoice, [ref]$parsedDefault)) {
+throw "Invalid default selection"
 }
 
-$SelectedModel = $models[$selectedIndex]
-$FullModel = "$ProviderId/$($SelectedModel.id)"
+$defaultIndex = $parsedDefault - 1
+if ($defaultIndex -lt 0 -or $defaultIndex -ge $selectedModels.Count) {
+throw "Default selection out of range"
+}
+
+$DefaultModel = $selectedModels[$defaultIndex]
+$FullModel = "$ProviderId/$($DefaultModel.id)"
 
 $json = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
@@ -149,7 +192,7 @@ $provider = [pscustomobject]@{
 baseUrl = $BaseUrl
 apiKey = $ApiKey
 api = "openai-completions"
-models = @($models)
+models = @($selectedModels)
 }
 
 $json.models.providers | Add-Member -Force -NotePropertyName $ProviderId -NotePropertyValue $provider
@@ -160,7 +203,8 @@ $json | ConvertTo-Json -Depth 100 | Set-Content -Path $ConfigPath -Encoding UTF8
 Write-Host ""
 Write-Host "OpenClaw config updated"
 Write-Host "Base URL: $BaseUrl"
-Write-Host "Selected model: $FullModel"
+Write-Host "Selected models: $($selectedModels.id -join ', ')"
+Write-Host "Default model: $FullModel"
 Write-Host "Config file: $ConfigPath"
 Write-Host "Backup file: $backupPath"
 Write-Host ""
