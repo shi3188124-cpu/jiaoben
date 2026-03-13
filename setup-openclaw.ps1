@@ -363,7 +363,6 @@ default_id = default_id.lstrip("\ufeff").strip() if default_id else None
 if not selected_ids:
 raise SystemExit("No models selected")
 
-
 def normalize_input(value):
 if value is None:
 return ["text"]
@@ -375,7 +374,6 @@ normalized = [str(item).strip() for item in value if str(item).strip()]
 return normalized or ["text"]
 text = str(value).strip()
 return [text] if text else ["text"]
-
 
 req = urllib.request.Request(
 f"{base_url}/models",
