@@ -524,3 +524,4 @@ Remove-Item Env:OC_DEFAULT_ID -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "Requesting gateway restart..."
 Invoke-OpenClaw -Arguments @("gateway", "restart")
+Write-Host "Done."
