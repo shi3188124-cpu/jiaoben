@@ -14,61 +14,39 @@ param(
 if (-not ($Object.PSObject.Properties.Name -contains $Name)) {
 $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
 }
-elseif ($null -eq $Object.$Name) {
-$Object.$Name = $Value
-}
 }
 
-function Normalize-ModelItem {
+function Convert-ToInputList {
 param(
-[Parameter(Mandatory = $true)]$Item
+[Parameter(Mandatory = $false)]$InputValue
 )
 
-$cost = $Item.cost
-if ($null -eq $cost) {
-$cost = [pscustomobject]@{}
+if ($null -eq $InputValue) {
+return @("text")
 }
 
-$contextWindow = $null
-if ($Item.PSObject.Properties.Name -contains 'contextWindow') {
-$contextWindow = $Item.contextWindow
-}
-elseif ($Item.PSObject.Properties.Name -contains 'context_window') {
-$contextWindow = $Item.context_window
+if ($InputValue -is [string]) {
+$trimmed = $InputValue.Trim()
+if ($trimmed) {
+return @($trimmed)
 }
 
-$maxTokens = $null
-if ($Item.PSObject.Properties.Name -contains 'maxTokens') {
-$maxTokens = $Item.maxTokens
-}
-elseif ($Item.PSObject.Properties.Name -contains 'max_tokens') {
-$maxTokens = $Item.max_tokens
+return @("text")
 }
 
-[pscustomobject]@{
-id = [string]$Item.id
-name = if ($Item.name) { [string]$Item.name } else { [string]$Item.id }
-reasoning = if ($Item.PSObject.Properties.Name -contains 'reasoning') { [bool]$Item.reasoning } else { $true }
-input = if ($Item.input) {
-if ($Item.input -is [System.Collections.IEnumerable] -and -not ($Item.input -is [string])) {
-@($Item.input | ForEach-Object { [string]$_ })
+$values = @($InputValue | ForEach-Object {
+if ($null -eq $_) { return }
+$text = [string]$_
+if (-not [string]::IsNullOrWhiteSpace($text)) {
+$text.Trim()
 }
-else {
-@([string]$Item.input)
+})
+
+if ($values.Count -gt 0) {
+return @($values)
 }
-}
-else {
-@("text")
-}
-cost = [pscustomobject]@{
-input = if ($cost.PSObject.Properties.Name -contains 'input') { $cost.input } else { 0 }
-output = if ($cost.PSObject.Properties.Name -contains 'output') { $cost.output } else { 0 }
-cacheRead = if ($cost.PSObject.Properties.Name -contains 'cacheRead') { $cost.cacheRead } else { 0 }
-cacheWrite = if ($cost.PSObject.Properties.Name -contains 'cacheWrite') { $cost.cacheWrite } else { 0 }
-}
-contextWindow = if ($contextWindow) { $contextWindow } else { 128000 }
-maxTokens = if ($maxTokens) { $maxTokens } else { 32768 }
-}
+
+return @("text")
 }
 
 function Get-OpenClawCommand {
@@ -113,6 +91,38 @@ return
 & $commandPath @Arguments
 }
 
+function Convert-ToProviderModel {
+param(
+[Parameter(Mandatory = $true)]$Item
+)
+
+$cost = [pscustomobject]@{
+input = 0
+output = 0
+cacheRead = 0
+cacheWrite = 0
+}
+
+if ($Item.cost) {
+$cost = [pscustomobject]@{
+input = if ($null -ne $Item.cost.input) { $Item.cost.input } else { 0 }
+output = if ($null -ne $Item.cost.output) { $Item.cost.output } else { 0 }
+cacheRead = if ($null -ne $Item.cost.cacheRead) { $Item.cost.cacheRead } else { 0 }
+cacheWrite = if ($null -ne $Item.cost.cacheWrite) { $Item.cost.cacheWrite } else { 0 }
+}
+}
+
+return [pscustomobject]@{
+id = $Item.id
+name = if ($Item.name) { $Item.name } else { $Item.id }
+reasoning = if ($null -ne $Item.reasoning) { [bool]$Item.reasoning } else { $true }
+input = Convert-ToInputList -InputValue $Item.input
+cost = $cost
+contextWindow = if ($Item.contextWindow) { $Item.contextWindow } elseif ($Item.context_window) { $Item.context_window } else { 128000 }
+maxTokens = if ($Item.maxTokens) { $Item.maxTokens } elseif ($Item.max_tokens) { $Item.max_tokens } else { 32768 }
+}
+}
+
 function Get-ModelList {
 param(
 [Parameter(Mandatory = $true)][string]$BaseUrl,
@@ -129,40 +139,36 @@ catch {
 throw "Failed to fetch model list from ${uri}: $($_.Exception.Message)"
 }
 
-if ($null -eq $response) {
+if (-not $response) {
 throw "Model API returned an empty response"
 }
 
-$items = $null
-if ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
-$items = @($response)
-}
-elseif ($response.PSObject.Properties.Name -contains 'data') {
+$items = @()
+if ($response.data) {
 $items = @($response.data)
 }
-elseif ($response.PSObject.Properties.Name -contains 'models') {
+elseif ($response.models) {
 $items = @($response.models)
+}
+elseif ($response -is [System.Array]) {
+$items = @($response)
 }
 else {
 throw "Unrecognized model response format"
 }
 
-$normalized = @()
-$seen = New-Object System.Collections.Generic.HashSet[string]
-
-foreach ($item in $items) {
-if (-not $item.id) { continue }
-$model = Normalize-ModelItem -Item $item
-if ($seen.Add($model.id)) {
-$normalized += $model
-}
+$models = foreach ($item in $items) {
+if ([string]::IsNullOrWhiteSpace($item.id)) { continue }
+Convert-ToProviderModel -Item $item
 }
 
-if ($normalized.Count -eq 0) {
+$models = @($models | Sort-Object id -Unique)
+
+if ($models.Count -eq 0) {
 throw "No models were returned by the API"
 }
 
-return @($normalized | Sort-Object id)
+return $models
 }
 
 function Select-ModelsInteractive {
@@ -170,8 +176,8 @@ param(
 [Parameter(Mandatory = $true)]$Models
 )
 
+$selected = New-Object 'System.Collections.Generic.HashSet[int]'
 $cursor = 0
-$selected = New-Object System.Collections.Generic.HashSet[int]
 $rawUI = $Host.UI.RawUI
 
 while ($true) {
@@ -224,6 +230,8 @@ continue
 }
 }
 }
+
+return @($selected | Sort-Object)
 }
 
 function Select-DefaultModelInteractive {
@@ -345,6 +353,7 @@ Set-Content -Path $idsPath -Value ($selectedModelIds -join [Environment]::NewLin
 $pythonScript = @'
 import json
 import os
+import sys
 import urllib.request
 from datetime import datetime
 
@@ -363,6 +372,7 @@ default_id = default_id.lstrip("\ufeff").strip() if default_id else None
 if not selected_ids:
 raise SystemExit("No models selected")
 
+
 def normalize_input(value):
 if value is None:
 return ["text"]
@@ -374,6 +384,7 @@ normalized = [str(item).strip() for item in value if str(item).strip()]
 return normalized or ["text"]
 text = str(value).strip()
 return [text] if text else ["text"]
+
 
 req = urllib.request.Request(
 f"{base_url}/models",
@@ -505,7 +516,6 @@ if ($pythonCommand -is [string]) {
 else {
 & $pythonCommand[0] @($pythonCommand[1..($pythonCommand.Count - 1)]) $pyPath
 }
-
 if ($LASTEXITCODE -ne 0) {
 throw "Python writer failed"
 }
@@ -525,3 +535,4 @@ Write-Host ""
 Write-Host "Requesting gateway restart..."
 Invoke-OpenClaw -Arguments @("gateway", "restart")
 Write-Host "Done."
+","timeoutMs":30000}
