@@ -14,39 +14,61 @@ param(
 if (-not ($Object.PSObject.Properties.Name -contains $Name)) {
 $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
 }
+elseif ($null -eq $Object.$Name) {
+$Object.$Name = $Value
+}
 }
 
-function Convert-ToInputList {
+function Normalize-ModelItem {
 param(
-[Parameter(Mandatory = $false)]$InputValue
+[Parameter(Mandatory = $true)]$Item
 )
 
-if ($null -eq $InputValue) {
-return @("text")
+$cost = $Item.cost
+if ($null -eq $cost) {
+$cost = [pscustomobject]@{}
 }
 
-if ($InputValue -is [string]) {
-$trimmed = $InputValue.Trim()
-if ($trimmed) {
-return @($trimmed)
+$contextWindow = $null
+if ($Item.PSObject.Properties.Name -contains 'contextWindow') {
+$contextWindow = $Item.contextWindow
+}
+elseif ($Item.PSObject.Properties.Name -contains 'context_window') {
+$contextWindow = $Item.context_window
 }
 
-return @("text")
+$maxTokens = $null
+if ($Item.PSObject.Properties.Name -contains 'maxTokens') {
+$maxTokens = $Item.maxTokens
+}
+elseif ($Item.PSObject.Properties.Name -contains 'max_tokens') {
+$maxTokens = $Item.max_tokens
 }
 
-$values = @($InputValue | ForEach-Object {
-if ($null -eq $_) { return }
-$text = [string]$_
-if (-not [string]::IsNullOrWhiteSpace($text)) {
-$text.Trim()
+[pscustomobject]@{
+id            = [string]$Item.id
+name          = if ($Item.name) { [string]$Item.name } else { [string]$Item.id }
+reasoning     = if ($Item.PSObject.Properties.Name -contains 'reasoning') { [bool]$Item.reasoning } else { $true }
+input         = if ($Item.input) {
+if ($Item.input -is [System.Collections.IEnumerable] -and -not ($Item.input -is [string])) {
+@($Item.input | ForEach-Object { [string]$_ })
 }
-})
-
-if ($values.Count -gt 0) {
-return @($values)
+else {
+@([string]$Item.input)
 }
-
-return @("text")
+}
+else {
+@("text")
+}
+cost          = [pscustomobject]@{
+input      = if ($cost.PSObject.Properties.Name -contains 'input') { $cost.input } else { 0 }
+output     = if ($cost.PSObject.Properties.Name -contains 'output') { $cost.output } else { 0 }
+cacheRead  = if ($cost.PSObject.Properties.Name -contains 'cacheRead') { $cost.cacheRead } else { 0 }
+cacheWrite = if ($cost.PSObject.Properties.Name -contains 'cacheWrite') { $cost.cacheWrite } else { 0 }
+}
+contextWindow = if ($contextWindow) { $contextWindow } else { 128000 }
+maxTokens     = if ($maxTokens) { $maxTokens } else { 32768 }
+}
 }
 
 function Get-OpenClawCommand {
@@ -91,38 +113,6 @@ return
 & $commandPath @Arguments
 }
 
-function Convert-ToProviderModel {
-param(
-[Parameter(Mandatory = $true)]$Item
-)
-
-$cost = [pscustomobject]@{
-input = 0
-output = 0
-cacheRead = 0
-cacheWrite = 0
-}
-
-if ($Item.cost) {
-$cost = [pscustomobject]@{
-input = if ($null -ne $Item.cost.input) { $Item.cost.input } else { 0 }
-output = if ($null -ne $Item.cost.output) { $Item.cost.output } else { 0 }
-cacheRead = if ($null -ne $Item.cost.cacheRead) { $Item.cost.cacheRead } else { 0 }
-cacheWrite = if ($null -ne $Item.cost.cacheWrite) { $Item.cost.cacheWrite } else { 0 }
-}
-}
-
-return [pscustomobject]@{
-id = $Item.id
-name = if ($Item.name) { $Item.name } else { $Item.id }
-reasoning = if ($null -ne $Item.reasoning) { [bool]$Item.reasoning } else { $true }
-input = Convert-ToInputList -InputValue $Item.input
-cost = $cost
-contextWindow = if ($Item.contextWindow) { $Item.contextWindow } elseif ($Item.context_window) { $Item.context_window } else { 128000 }
-maxTokens = if ($Item.maxTokens) { $Item.maxTokens } elseif ($Item.max_tokens) { $Item.max_tokens } else { 32768 }
-}
-}
-
 function Get-ModelList {
 param(
 [Parameter(Mandatory = $true)][string]$BaseUrl,
@@ -139,36 +129,40 @@ catch {
 throw "Failed to fetch model list from ${uri}: $($_.Exception.Message)"
 }
 
-if (-not $response) {
+if ($null -eq $response) {
 throw "Model API returned an empty response"
 }
 
-$items = @()
-if ($response.data) {
+$items = $null
+if ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
+$items = @($response)
+}
+elseif ($response.PSObject.Properties.Name -contains 'data') {
 $items = @($response.data)
 }
-elseif ($response.models) {
+elseif ($response.PSObject.Properties.Name -contains 'models') {
 $items = @($response.models)
-}
-elseif ($response -is [System.Array]) {
-$items = @($response)
 }
 else {
 throw "Unrecognized model response format"
 }
 
-$models = foreach ($item in $items) {
-if ([string]::IsNullOrWhiteSpace($item.id)) { continue }
-Convert-ToProviderModel -Item $item
+$normalized = @()
+$seen = New-Object System.Collections.Generic.HashSet[string]
+
+foreach ($item in $items) {
+if (-not $item.id) { continue }
+$model = Normalize-ModelItem -Item $item
+if ($seen.Add($model.id)) {
+$normalized += $model
+}
 }
 
-$models = @($models | Sort-Object id -Unique)
-
-if ($models.Count -eq 0) {
+if ($normalized.Count -eq 0) {
 throw "No models were returned by the API"
 }
 
-return $models
+return @($normalized | Sort-Object id)
 }
 
 function Select-ModelsInteractive {
@@ -176,8 +170,8 @@ param(
 [Parameter(Mandatory = $true)]$Models
 )
 
-$selected = New-Object 'System.Collections.Generic.HashSet[int]'
 $cursor = 0
+$selected = New-Object System.Collections.Generic.HashSet[int]
 $rawUI = $Host.UI.RawUI
 
 while ($true) {
@@ -230,8 +224,6 @@ continue
 }
 }
 }
-
-return @($selected | Sort-Object)
 }
 
 function Select-DefaultModelInteractive {
@@ -353,7 +345,6 @@ Set-Content -Path $idsPath -Value ($selectedModelIds -join [Environment]::NewLin
 $pythonScript = @'
 import json
 import os
-import sys
 import urllib.request
 from datetime import datetime
 
@@ -365,89 +356,87 @@ selected_ids_path = os.environ["OC_SELECTED_IDS_FILE"]
 default_id = os.environ.get("OC_DEFAULT_ID") or None
 
 with open(selected_ids_path, "r", encoding="utf-8-sig") as f:
-selected_ids = [line.lstrip("\ufeff").strip() for line in f if line.strip()]
+    selected_ids = [line.lstrip("\ufeff").strip() for line in f if line.strip()]
 
 default_id = default_id.lstrip("\ufeff").strip() if default_id else None
 
 if not selected_ids:
-raise SystemExit("No models selected")
-
+    raise SystemExit("No models selected")
 
 def normalize_input(value):
-if value is None:
-return ["text"]
-if isinstance(value, str):
-value = value.strip()
-return [value] if value else ["text"]
-if isinstance(value, list):
-normalized = [str(item).strip() for item in value if str(item).strip()]
-return normalized or ["text"]
-text = str(value).strip()
-return [text] if text else ["text"]
-
+    if value is None:
+        return ["text"]
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else ["text"]
+    if isinstance(value, list):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return normalized or ["text"]
+    text = str(value).strip()
+    return [text] if text else ["text"]
 
 req = urllib.request.Request(
-f"{base_url}/models",
-headers={"Authorization": f"Bearer {api_key}"},
+    f"{base_url}/models",
+    headers={"Authorization": f"Bearer {api_key}"},
 )
 
 try:
-with urllib.request.urlopen(req, timeout=30) as resp:
-payload = json.loads(resp.read().decode("utf-8"))
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
 except Exception as e:
-raise SystemExit(f"Failed to refetch model list: {e}")
+    raise SystemExit(f"Failed to refetch model list: {e}")
 
 if isinstance(payload, dict) and "data" in payload:
-items = payload["data"]
+    items = payload["data"]
 elif isinstance(payload, dict) and "models" in payload:
-items = payload["models"]
+    items = payload["models"]
 elif isinstance(payload, list):
-items = payload
+    items = payload
 else:
-raise SystemExit("Unrecognized model response format")
+    raise SystemExit("Unrecognized model response format")
 
 index = {}
 for item in items:
-model_id = item.get("id")
-if not model_id:
-continue
-cost = item.get("cost") or {}
-index[model_id] = {
-"id": model_id,
-"name": item.get("name") or model_id,
-"reasoning": bool(item.get("reasoning", True)),
-"input": normalize_input(item.get("input")),
-"cost": {
-"input": cost.get("input", 0),
-"output": cost.get("output", 0),
-"cacheRead": cost.get("cacheRead", 0),
-"cacheWrite": cost.get("cacheWrite", 0),
-},
-"contextWindow": item.get("contextWindow") or item.get("context_window") or 128000,
-"maxTokens": item.get("maxTokens") or item.get("max_tokens") or 32768,
-}
+    model_id = item.get("id")
+    if not model_id:
+        continue
+    cost = item.get("cost") or {}
+    index[model_id] = {
+        "id": model_id,
+        "name": item.get("name") or model_id,
+        "reasoning": bool(item.get("reasoning", True)),
+        "input": normalize_input(item.get("input")),
+        "cost": {
+            "input": cost.get("input", 0),
+            "output": cost.get("output", 0),
+            "cacheRead": cost.get("cacheRead", 0),
+            "cacheWrite": cost.get("cacheWrite", 0),
+        },
+        "contextWindow": item.get("contextWindow") or item.get("context_window") or 128000,
+        "maxTokens": item.get("maxTokens") or item.get("max_tokens") or 32768,
+    }
 
 selected_models = []
 for model_id in selected_ids:
-lookup_id = model_id
-if lookup_id not in index and provider_id and not lookup_id.startswith(f"{provider_id}/"):
-prefixed = f"{provider_id}/{lookup_id}"
-if prefixed in index:
-lookup_id = prefixed
-if lookup_id not in index:
-suffix_matches = [candidate for candidate in index.keys() if candidate == model_id or candidate.endswith("/" + model_id)]
-if len(suffix_matches) == 1:
-lookup_id = suffix_matches[0]
-if lookup_id not in index:
-raise SystemExit(f"Selected model not found in API response: {model_id}")
-selected_models.append(index[lookup_id])
+    lookup_id = model_id
+    if lookup_id not in index and provider_id and not lookup_id.startswith(f"{provider_id}/"):
+        prefixed = f"{provider_id}/{lookup_id}"
+        if prefixed in index:
+            lookup_id = prefixed
+    if lookup_id not in index:
+        suffix_matches = [candidate for candidate in index.keys() if candidate == model_id or candidate.endswith("/" + model_id)]
+        if len(suffix_matches) == 1:
+            lookup_id = suffix_matches[0]
+    if lookup_id not in index:
+        raise SystemExit(f"Selected model not found in API response: {model_id}")
+    selected_models.append(index[lookup_id])
 
 with open(config_path, "r", encoding="utf-8") as f:
-data = json.load(f)
+    data = json.load(f)
 
 backup_path = f"{config_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 with open(backup_path, "w", encoding="utf-8") as f:
-json.dump(data, f, ensure_ascii=False, indent=2)
+    json.dump(data, f, ensure_ascii=False, indent=2)
 
 data.setdefault("auth", {})
 data["auth"].setdefault("profiles", {})
@@ -458,45 +447,45 @@ data["agents"].setdefault("defaults", {})
 data["agents"]["defaults"].setdefault("model", {})
 
 data["auth"]["profiles"][f"{provider_id}:default"] = {
-"provider": provider_id,
-"mode": "api_key",
+    "provider": provider_id,
+    "mode": "api_key",
 }
 
 data["models"]["providers"][provider_id] = {
-"baseUrl": base_url,
-"apiKey": api_key,
-"api": "openai-completions",
-"models": selected_models,
+    "baseUrl": base_url,
+    "apiKey": api_key,
+    "api": "openai-completions",
+    "models": selected_models,
 }
 
 if default_id:
-data["agents"]["defaults"]["model"]["primary"] = f"{provider_id}/{default_id}"
+    data["agents"]["defaults"]["model"]["primary"] = f"{provider_id}/{default_id}"
 
 with open(config_path, "w", encoding="utf-8") as f:
-json.dump(data, f, ensure_ascii=False, indent=2)
+    json.dump(data, f, ensure_ascii=False, indent=2)
 
 with open(config_path, "r", encoding="utf-8") as f:
-written = json.load(f)
+    written = json.load(f)
 
 written_models = ((((written.get("models") or {}).get("providers") or {}).get(provider_id) or {}).get("models")) or []
 if not written_models:
-raise SystemExit(f"Provider '{provider_id}' has no models after write")
+    raise SystemExit(f"Provider '{provider_id}' has no models after write")
 
 for model in written_models:
-model_input = model.get("input")
-if not isinstance(model_input, list) or not model_input:
-raise SystemExit(
-f"Provider '{provider_id}' model '{model.get('id')}' has invalid input after write; expected non-empty array"
-)
+    model_input = model.get("input")
+    if not isinstance(model_input, list) or not model_input:
+        raise SystemExit(
+            f"Provider '{provider_id}' model '{model.get('id')}' has invalid input after write; expected non-empty array"
+        )
 
 print()
 print("OpenClaw config updated")
 print(f"Base URL: {base_url}")
 print(f"Selected models: {', '.join(m['id'] for m in selected_models)}")
 if default_id:
-print(f"Default model: {provider_id}/{default_id}")
+    print(f"Default model: {provider_id}/{default_id}")
 else:
-print("Default model: kept existing value")
+    print("Default model: kept existing value")
 print(f"Config file: {config_path}")
 print(f"Backup file: {backup_path}")
 '@
@@ -511,13 +500,14 @@ $env:OC_SELECTED_IDS_FILE = $idsPath
 $env:OC_DEFAULT_ID = if ($selectedDefaultId) { $selectedDefaultId } else { "" }
 
 if ($pythonCommand -is [string]) {
-& $pythonCommand $pyPath
+    & $pythonCommand $pyPath
 }
 else {
-& $pythonCommand[0] @($pythonCommand[1..($pythonCommand.Count - 1)]) $pyPath
+    & $pythonCommand[0] @($pythonCommand[1..($pythonCommand.Count - 1)]) $pyPath
 }
+
 if ($LASTEXITCODE -ne 0) {
-throw "Python writer failed"
+    throw "Python writer failed"
 }
 }
 finally {
@@ -535,4 +525,3 @@ Write-Host ""
 Write-Host "Requesting gateway restart..."
 Invoke-OpenClaw -Arguments @("gateway", "restart")
 Write-Host "Done."
-","timeoutMs":30000}
