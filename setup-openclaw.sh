@@ -6,26 +6,29 @@ BASE_URL="http://122.51.82.68:8059/v1"
 PROVIDER_ID="szy"
 
 if ! command -v openclaw >/dev/null 2>&1; then
-echo "openclaw not found. Please install OpenClaw first."
-exit 1
+  echo "openclaw not found. Please install OpenClaw first."
+  exit 1
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-echo "python3 not found. Please install Python 3 first."
-exit 1
+  echo "python3 not found. Please install Python 3 first."
+  exit 1
 fi
 
 if [ ! -f "$CONFIG_PATH" ]; then
-echo "OpenClaw config file not found: $CONFIG_PATH"
-exit 1
+  echo "OpenClaw config file not found: $CONFIG_PATH"
+  exit 1
 fi
 
-read -r -s -p "Enter API Key: " API_KEY
-echo
+printf "Enter API Key: "
+stty -echo
+read -r API_KEY
+stty echo
+printf "\n"
 
 if [ -z "$API_KEY" ]; then
-echo "API Key cannot be empty"
-exit 1
+  echo "API Key cannot be empty"
+  exit 1
 fi
 
 export API_KEY BASE_URL PROVIDER_ID CONFIG_PATH
@@ -121,6 +124,7 @@ def clear_screen():
 def read_key():
     try:
         import msvcrt  # type: ignore
+
         first = msvcrt.getwch()
         if first in ("\r", "\n"):
             return "ENTER"
@@ -136,6 +140,7 @@ def read_key():
     except ImportError:
         import termios
         import tty
+
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
@@ -195,6 +200,7 @@ def select_default_interactive(selected_models, current_default):
     selected = 0
     normalized_current = current_default
     prefix = f"{provider_id}/"
+
     if normalized_current and normalized_current.startswith(prefix):
         normalized_current = normalized_current[len(prefix):]
 
